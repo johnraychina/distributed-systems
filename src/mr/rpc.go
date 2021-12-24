@@ -14,12 +14,38 @@ import "strconv"
 // and reply for an RPC.
 //
 
-type ExampleArgs struct {
-	X int
+type Task struct {
+	Type    int
+	Id      string
+	NMap    int
+	NReduce int
 }
 
-type ExampleReply struct {
-	Y int
+const (
+	TaskTypeMap    = 1
+	TaskTypeReduce = 2
+	TaskTypeWait   = 0
+	TaskTypeExit   = -1
+)
+
+const (
+	TaskStatusInit     = 0
+	TaskStatusAccepted = 1
+	TaskStatusFinished = 2
+)
+
+type AcceptTaskArgs struct {
+}
+
+type AcceptTaskReply struct {
+	T *Task
+}
+
+type FinishTaskArgs struct {
+	T *Task
+}
+
+type FinishTaskReply struct {
 }
 
 // Add your RPC definitions here.

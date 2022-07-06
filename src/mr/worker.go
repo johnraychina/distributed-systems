@@ -1,11 +1,13 @@
 package mr
 
 import (
+	"bufio"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 import "log"
@@ -43,6 +45,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	for {
 		// Your worker implementation here.
 		reply := AcceptTask()
+		fmt.Println("Accepted task: ", reply.T)
 
 		switch reply.T.Type {
 		case TaskTypeMap:
@@ -55,30 +58,68 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			return
 		}
 
+		fmt.Println("Finish task: ", reply.T)
 		TaskFinished(reply)
 	}
 }
 
-func doReduce(reducef func(string, []string) string, t *Task) {
-	// todo mr-mapId-reduceId，for 循环处理一个桶
-	for mapId := 0; mapId < t.NMap; mapId++ {
-		file, err := os.Open("mr-" + strconv.Itoa(mapId) + "-" + t.Id)
+func doReduce(reducef func(string, []string) string, reduceTask *Task) {
+
+	intermediate := []KeyValue{}
+
+	// mr-mapId-reduceId，for 循环处理一个桶
+	for mapId := 0; mapId < reduceTask.NMap; mapId++ {
+		file, err := os.Open("mr-" + strconv.Itoa(mapId) + "-" + reduceTask.Id)
 		if err != nil {
 			log.Fatalf("cannot open %v", mapId)
 		}
-		content, err := ioutil.ReadAll(file)
-		if err != nil {
-			log.Fatalf("cannot read %v", mapId)
+
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := scanner.Text()
+			col := strings.Split(line, " ")
+			kv := KeyValue{Key: col[0], Value: col[1]}
+			intermediate = append(intermediate, kv)
 		}
-		file.Close()
 	}
 
 	// 相同的key组成一组，sort，丢给reduce处理
+	// being partitioned into NxM buckets.
+	sort.Sort(ByKey(intermediate))
+
+	outFileName := "mr-out-" + reduceTask.Id
+	outFile, err := os.Create(outFileName)
+	if err != nil {
+		log.Fatalf("error create file %v", outFileName)
+	}
+
+	lastKey := ""
+	words := make([]string, 0)
+	for i := 0; i < len(intermediate); i++ {
+		kv := intermediate[i]
+		if kv.Key != lastKey {
+			if lastKey != "" {
+				// 前面相同的key，先做reduce，写到输出文件中mr-out-reduceId
+				wc := reducef(lastKey, words)
+				fmt.Fprintf(outFile, "%s %s\n", lastKey, wc)
+			}
+			// 清空words
+			words = make([]string, 0)
+		}
+
+		words = append(words, kv.Value)
+	}
+
+	//todo
+	// 最后再做一次reduce
+	wc := reducef(lastKey, words)
+	fmt.Fprintf(outFile, "%s %s\n", lastKey, wc)
 
 }
 
-func doMap(mapf func(string, string) []KeyValue, t *Task) {
-	mapId := t.Id
+// 输入文件名，输出 mr-mapId-reduceId
+func doMap(mapf func(string, string) []KeyValue, mapTask *Task) {
+	mapId := mapTask.Id
 	file, err := os.Open(mapId)
 	if err != nil {
 		log.Fatalf("cannot open %v", mapId)
@@ -96,13 +137,13 @@ func doMap(mapf func(string, string) []KeyValue, t *Task) {
 	sort.Sort(ByKey(intermediate))
 
 	// 每个文件分10个桶
-	intermediateFiles := make([]*os.File, t.NReduce, t.NReduce)
-	for r := 0; r < t.NReduce; r++ {
+	intermediateFiles := make([]*os.File, mapTask.NReduce, mapTask.NReduce)
+	for r := 0; r < mapTask.NReduce; r++ {
 		ofile, _ := os.Create("mr-" + mapId + "-" + strconv.Itoa(r))
 		intermediateFiles[r] = ofile
 	}
 	defer func() {
-		for r := 0; r < t.NReduce; r++ {
+		for r := 0; r < mapTask.NReduce; r++ {
 			intermediateFiles[r].Close()
 		}
 	}()
@@ -110,8 +151,8 @@ func doMap(mapf func(string, string) []KeyValue, t *Task) {
 	// todo 算子下推，先预处理部分reduce
 	// 将kv做哈希分桶，写入对应文件，以便后续reduce处理
 	for _, kv := range intermediate {
-		r := ihash(kv.Key) % t.NReduce
-		fmt.Fprintf(intermediateFiles[r], "%v %v\n", intermediate[r].Key, intermediate[r].Value)
+		r := ihash(kv.Key) % mapTask.NReduce
+		fmt.Fprintf(intermediateFiles[r], "%s %s\n", intermediate[r].Key, intermediate[r].Value)
 	}
 }
 
@@ -127,7 +168,6 @@ func AcceptTask() *AcceptTaskReply {
 	args := AcceptTaskArgs{}
 	reply := AcceptTaskReply{}
 	call("Coordinator.AcceptTask", &args, &reply)
-	fmt.Printf("reply.T %v\n", reply.T)
 	return &reply
 }
 

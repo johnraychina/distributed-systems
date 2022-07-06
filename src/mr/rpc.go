@@ -6,7 +6,10 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 import "strconv"
 
 //
@@ -15,10 +18,14 @@ import "strconv"
 //
 
 type Task struct {
-	Type    int
 	Id      string
+	Type    int
 	NMap    int
 	NReduce int
+}
+
+func (t Task) String() string {
+	return fmt.Sprintf("Task{ Id:%s, Type:%d, NMap:%d, NReduce:%d}", t.Id, t.Type, t.NMap, t.NReduce)
 }
 
 const (
@@ -46,6 +53,12 @@ type FinishTaskArgs struct {
 }
 
 type FinishTaskReply struct {
+}
+
+type DoneArg struct {
+}
+
+type DoneReply struct {
 }
 
 // Add your RPC definitions here.

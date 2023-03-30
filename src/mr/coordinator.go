@@ -15,6 +15,19 @@ type Coordinator struct {
 	NMap    int
 	NReduce int
 
+	// 需求：
+	// 1.任务并行执行，不能重复处理，一个任务被哪个work处理中，需要标明，用一个struct实现:taskId-workerId-startTime
+	//
+	//
+	// 2.任务可能失败或超时，需要能由其他worker继续处理：任务必须有超时机制，可以判断从何时开始被处理的。
+	// 多个任务，用slice报错，执行完成后则置为success，执行超时，空闲的worker可以扫描到，并CAS抢占处理
+
+	// 3.需要能判断整个任务是否执行完成:
+	// todo map-reduce任务是一个动态的graph
+
+	// map：file name --> []kv
+	// reduce:  key, []values --> key, len(values)
+
 	// 任务编号，任务状态分3个channel(0-未领取，1-已领取，2-执行完成)
 	// 初始化任务: files -> MakeCoordinator -> InitMapTask
 	// 领取map任务: InitMapTask --(AcceptTask)---> AcceptedMapTask
@@ -140,9 +153,10 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// init Coordinator
 	c.Files = files
 	c.NMap = len(files)
+	// map task queue, containing the indexes of each file.
 	c.InitMapTask = make(chan string, len(files))
 	for id, _ := range files {
-		c.InitMapTask <- strconv.Itoa(id) // 映射一下，通用一点
+		c.InitMapTask <- strconv.Itoa(id)
 	}
 
 	c.AcceptedMapTask = make(chan string, len(files))

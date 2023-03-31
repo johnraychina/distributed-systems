@@ -20,7 +20,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	coordinator := mr.MakeCoordinator(os.Args[1:], 10)
+	coordinator := mr.MakeCoordinator(os.Args[1:], 3, 10)
 	for !mr.Done(coordinator) {
 		time.Sleep(time.Second)
 	}

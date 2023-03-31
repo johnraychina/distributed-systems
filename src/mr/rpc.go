@@ -9,6 +9,7 @@ package mr
 import (
 	"fmt"
 	"os"
+	"time"
 )
 import "strconv"
 
@@ -17,48 +18,52 @@ import "strconv"
 // and reply for an RPC.
 //
 
+// Task : task file name, task type
 type Task struct {
-	Id      string
-	Type    int
-	NMap    int
-	NReduce int
+	FileName    string
+	OutFileName string
+	TaskType    int
+	NReduce     int
+}
+
+// WorkerTask : worker id, start time, task file name, task type
+type WorkerTask struct {
+	Task       Task
+	WorkerId   int // unique worker id
+	StartTime  time.Time
+	TaskStatus int
 }
 
 func (t Task) String() string {
-	return fmt.Sprintf("Task{ Id:%s, Type:%d, NMap:%d, NReduce:%d}", t.Id, t.Type, t.NMap, t.NReduce)
+	return fmt.Sprintf("Task: FileName=%s, TaskType=%d", t.FileName, t.TaskType)
 }
 
 const (
 	TaskTypeMap    = 1
 	TaskTypeReduce = 2
-	TaskTypeWait   = 0
-	TaskTypeExit   = -1
 )
 
 const (
-	TaskStatusInit     = 0
-	TaskStatusAccepted = 1
-	TaskStatusFinished = 2
+	TaskStatusInit       = 0
+	TaskStatusProcessing = 1
+	TaskStatusSuccess    = 2
 )
 
-type AcceptTaskArgs struct {
+type TaskPullReq struct {
+	WorkerId int
 }
 
-type AcceptTaskReply struct {
-	T *Task
+type TaskPullReply struct {
+	Task *Task
 }
 
-type FinishTaskArgs struct {
-	T *Task
+type TaskFinishReq struct {
+	WorkerId int
+	Task     *Task
 }
 
-type FinishTaskReply struct {
-}
-
-type DoneArg struct {
-}
-
-type DoneReply struct {
+type TaskFinishReply struct {
+	message string
 }
 
 // Add your RPC definitions here.

@@ -40,106 +40,101 @@ func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // Worker
 // main/mrworker.go calls this function.
-func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
+func Worker(workerId int, mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 
 	for {
 		// Your worker implementation here.
-		reply := AcceptTask()
-		fmt.Println("Accepted task: ", reply.T)
-
-		switch reply.T.Type {
-		case TaskTypeMap:
-			doMap(mapf, reply.T)
-		case TaskTypeReduce:
-			doReduce(reducef, reply.T)
-		case TaskTypeWait:
-			time.Sleep(1 * time.Second)
-		case TaskTypeExit:
-			return
+		reply := PullTask(workerId)
+		if reply.Task == nil {
+			time.Sleep(1 * time.Second) // 避免无任务时，疯狂请求RPC
+			fmt.Printf("%v No task for now\n", time.Now())
+			continue
 		}
 
-		fmt.Println("Finish task: ", reply.T)
-		TaskFinished(reply)
+		fmt.Printf("%v Pulled %s, \n", time.Now(), reply.Task)
+
+		switch reply.Task.TaskType {
+		case TaskTypeMap:
+			doMap(mapf, reply.Task)
+		case TaskTypeReduce:
+			doReduce(reducef, reply.Task)
+		}
+
+		FinishTask(reply.Task, workerId)
+		fmt.Printf("%v  Finished ", time.Now(), reply.Task)
 	}
 }
 
 func doReduce(reducef func(string, []string) string, reduceTask *Task) {
 
-	intermediate := []KeyValue{}
+	file, err := os.Open(reduceTask.FileName)
+	if err != nil {
+		log.Fatalf("cannot open %v", file)
+	}
+	scanner := bufio.NewScanner(file)
+	defer file.Close()
 
-	// mr-mapId-reduceId，for 循环处理一个桶
-	for mapId := 0; mapId < reduceTask.NMap; mapId++ {
-		file, err := os.Open("mr-" + strconv.Itoa(mapId) + "-" + reduceTask.Id)
-		if err != nil {
-			log.Fatalf("cannot open %v", mapId)
-		}
-
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			line := scanner.Text()
-			col := strings.Split(line, " ")
-			kv := KeyValue{Key: col[0], Value: col[1]}
-			intermediate = append(intermediate, kv)
-		}
+	var intermediate []KeyValue
+	for scanner.Scan() {
+		line := scanner.Text()
+		col := strings.Split(line, " ")
+		intermediate = append(intermediate, KeyValue{Key: col[0], Value: col[1]})
 	}
 
 	// 相同的key组成一组，sort，丢给reduce处理
 	// being partitioned into NxM buckets.
 	sort.Sort(ByKey(intermediate))
 
-	outFileName := "mr-out-" + reduceTask.Id
-	outFile, err := os.Create(outFileName)
+	ofile, err := os.Create(reduceTask.OutFileName)
 	if err != nil {
-		log.Fatalf("error create file %v", outFileName)
+		log.Fatalf("error create file %v", reduceTask.OutFileName)
 	}
 
-	lastKey := ""
-	words := make([]string, 0)
-	for i := 0; i < len(intermediate); i++ {
-		kv := intermediate[i]
-		if kv.Key != lastKey {
-			if lastKey != "" {
-				// 前面相同的key，先做reduce，写到输出文件中mr-out-reduceId
-				wc := reducef(lastKey, words)
-				fmt.Fprintf(outFile, "%s %s\n", lastKey, wc)
-			}
-			// 清空words
-			words = make([]string, 0)
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
 		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
 
-		words = append(words, kv.Value)
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
 	}
-
-	//todo
-	// 最后再做一次reduce
-	wc := reducef(lastKey, words)
-	fmt.Fprintf(outFile, "%s %s\n", lastKey, wc)
-
 }
 
-// 输入文件名，输出 mr-mapId-reduceId
+// 输入文件名，输出 mr-reduceId
 func doMap(mapf func(string, string) []KeyValue, mapTask *Task) {
-	mapId := mapTask.Id
-	file, err := os.Open(mapId)
+	fileName := mapTask.FileName
+	file, err := os.Open(fileName)
 	if err != nil {
-		log.Fatalf("cannot open %v", mapId)
+		log.Fatalf("cannot open %v", fileName)
 	}
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
-		log.Fatalf("cannot read %v", mapId)
+		log.Fatalf("cannot read %v", fileName)
 	}
 	file.Close()
 
-	kva := mapf(mapId, string(content))
-	intermediate := []KeyValue{}
+	kva := mapf(fileName, string(content))
+
+	var intermediate []KeyValue
 	intermediate = append(intermediate, kva...)
+
 	// being partitioned into NxM buckets.
 	sort.Sort(ByKey(intermediate))
 
-	// 每个文件分10个桶
+	// 每个文件分NReduce个桶
+	// fixme 同一台启动多个worker，注意避免互相干扰
 	intermediateFiles := make([]*os.File, mapTask.NReduce, mapTask.NReduce)
 	for r := 0; r < mapTask.NReduce; r++ {
-		ofile, _ := os.Create("mr-" + mapId + "-" + strconv.Itoa(r))
+		ofile, _ := os.Create("mr-" + strconv.Itoa(r))
 		intermediateFiles[r] = ofile
 	}
 	defer func() {
@@ -148,26 +143,24 @@ func doMap(mapf func(string, string) []KeyValue, mapTask *Task) {
 		}
 	}()
 
-	// todo 算子下推，先预处理部分reduce
 	// 将kv做哈希分桶，写入对应文件，以便后续reduce处理
 	for _, kv := range intermediate {
 		r := ihash(kv.Key) % mapTask.NReduce
-		fmt.Fprintf(intermediateFiles[r], "%s %s\n", intermediate[r].Key, intermediate[r].Value)
+		fmt.Fprintf(intermediateFiles[r], "%s %s\n", kv.Key, kv.Value)
 	}
 }
 
-// TaskFinished 完成任务后，调用Coordinator.TaskFinished标记任务为"完成"
-func TaskFinished(r *AcceptTaskReply) {
-	args := FinishTaskArgs{T: r.T}
-	reply := FinishTaskReply{}
-	call("Coordinator.TaskFinished", &args, &reply)
+// FinishTask 完成任务后，调用Coordinator.TaskFinished标记任务为"完成"
+func FinishTask(task *Task, workerId int) {
+	args := TaskFinishReq{Task: task, WorkerId: workerId}
+	reply := TaskFinishReply{}
+	call("Coordinator.FinishTask", &args, &reply)
 }
 
-// AcceptTask 调用Coordinator.AcceptTask领取任务，将标记任务为"已领取"
-func AcceptTask() *AcceptTaskReply {
-	args := AcceptTaskArgs{}
-	reply := AcceptTaskReply{}
-	call("Coordinator.AcceptTask", &args, &reply)
+func PullTask(workerId int) *TaskPullReply {
+	req := TaskPullReq{WorkerId: workerId}
+	reply := TaskPullReply{}
+	call("Coordinator.PullTask", &req, &reply)
 	return &reply
 }
 

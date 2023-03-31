@@ -31,7 +31,10 @@ func main() {
 	}
 
 	mapf, reducef := loadPlugin2(pluginPath)
-	mr.Worker(mapf, reducef)
+
+	// process id as worker id
+	workerId := os.Getpid()
+	mr.Worker(workerId, mapf, reducef)
 }
 
 func loadPlugin2(filename string) (func(string, string) []mr.KeyValue, func(string, []string) string) {

@@ -20,10 +20,10 @@ import "strconv"
 
 // Task : task file name, task type
 type Task struct {
-	FileName    string
-	OutFileName string
-	TaskType    int
-	NReduce     int
+	TaskType int
+	TaskId   int
+	NReduce  int
+	FileName string
 }
 
 // WorkerTask : worker id, start time, task file name, task type
@@ -35,7 +35,14 @@ type WorkerTask struct {
 }
 
 func (t Task) String() string {
-	return fmt.Sprintf("Task: FileName=%s, TaskType=%d", t.FileName, t.TaskType)
+	taskTypeStr := "Unknown"
+	switch t.TaskType {
+	case TaskTypeMap:
+		taskTypeStr = "Map"
+	case TaskTypeReduce:
+		taskTypeStr = "Reduce"
+	}
+	return fmt.Sprintf("Task: TaskId=%d, TaskType=%s, FileName=%s", t.TaskId, taskTypeStr, t.FileName)
 }
 
 const (
@@ -63,7 +70,7 @@ type TaskFinishReq struct {
 }
 
 type TaskFinishReply struct {
-	message string
+	Message string
 }
 
 // Add your RPC definitions here.

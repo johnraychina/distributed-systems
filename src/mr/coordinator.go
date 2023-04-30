@@ -3,7 +3,7 @@ package mr
 import (
 	"fmt"
 	"log"
-	"strconv"
+	"sync"
 	"time"
 )
 import "net"
@@ -30,8 +30,16 @@ type Coordinator struct {
 	//1、每个文件对应一个map任务编号， map任务将一个文件的内容分成单词数组，然后按 Y = ihash(key) % NReduce 映射到对应的reduce任务。
 	//中间产生的文件建议命名为 mr-X, 其中X为reduce任务编号.
 	//2、每个reduce任务处理对应 mr-X的文件。
-	TaskQueue      chan Task     // task file name, task type
-	WorkerTaskList []*WorkerTask // worker id, start time, task file name, task type
+	MapTaskQueue   chan Task     // task file name, task type
+	MapWorkerTasks []*WorkerTask // worker id, start time, task file name, task type
+	MapWaitGroup   sync.WaitGroup
+
+	// 注意：reduce 任务需要等待map任务全部完成才能开始执行
+	ReduceTaskQueue   chan Task     // task file name, task type
+	ReduceWorkerTasks []*WorkerTask // worker id, start time, task file name, task type
+	ReduceWaitGroup   sync.WaitGroup
+
+	Done chan bool // the done channel indicate if the whole task is done
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -40,49 +48,80 @@ type Coordinator struct {
 func (c *Coordinator) PullTask(req TaskPullReq, reply *TaskPullReply) error {
 	select {
 	// pull a task and add to the worker task list, and reply to the worker.
-	case task := <-c.TaskQueue:
-		fmt.Printf("%v worker(%d) has pull a task %s.\n", time.Now(), req.WorkerId, task)
-		for _, e := range c.WorkerTaskList {
-			// 未被处理或者 超过10秒，分片给当前请求的worker处理。
-			now := time.Now()
-			if e.TaskStatus == TaskStatusInit || (e.TaskStatus == TaskStatusProcessing && now.Sub(e.StartTime).Seconds() > 10) {
-				e.WorkerId = req.WorkerId
-				e.StartTime = now
-			}
-		}
-		reply.Task = &task
+	case r := <-c.ReduceTaskQueue:
+		reply.Task = c.replyTask(req, r)
+		return nil
+	case m := <-c.MapTaskQueue:
+		reply.Task = c.replyTask(req, m)
+		return nil
 	default:
-		fmt.Printf("%v worker(%d) tried to pull a task, but no task in queue.\n", time.Now(), req.WorkerId)
+		//fmt.Printf("%v worker(%d) tried to pull a task, but no task in queue.\n", time.Now(), req.WorkerId)
 		return nil
 	}
+}
+
+const TimeOutSeconds = 20
+
+func (c *Coordinator) replyTask(req TaskPullReq, task Task) *Task {
+	workerTasks := c.MapWorkerTasks
+	if task.TaskType == TaskTypeReduce {
+		workerTasks = c.ReduceWorkerTasks
+	}
+
+	for _, e := range workerTasks {
+		// 未被处理或者 超过10秒，分片给当前请求的worker处理。
+		now := time.Now()
+		if e.TaskStatus == TaskStatusInit {
+			e.WorkerId = req.WorkerId
+			e.StartTime = now
+			e.TaskStatus = TaskStatusProcessing
+			fmt.Printf("%v worker(%d) has pull a task %s.\n", time.Now(), req.WorkerId, task)
+			return &task
+		} else if e.TaskStatus == TaskStatusProcessing && now.Sub(e.StartTime).Seconds() > TimeOutSeconds {
+			originalWorkerId := e.WorkerId
+			e.WorkerId = req.WorkerId
+			e.StartTime = now
+			e.TaskStatus = TaskStatusProcessing
+			fmt.Printf("%v worker(%d) steal a task %s from worker(%d).\n", time.Now(), req.WorkerId, task, originalWorkerId)
+			return &task
+		}
+	}
+
 	return nil
 }
 
-// FinishTask 标记任务已完成, todo 后续定时清理该列表
+// FinishTask 标记任务已完成
 func (c *Coordinator) FinishTask(req TaskFinishReq, reply *TaskFinishReply) error {
 
-	fmt.Printf(" %v worker(%d) has finished %s \n", time.Now(), req.WorkerId, req.Task)
+	fmt.Printf("%v worker(%d) has finished task: %v \n", time.Now(), req.WorkerId, req.Task)
 
 	// remove task from list
 	task := req.Task
-	for _, e := range c.WorkerTaskList {
-		if req.WorkerId == e.WorkerId && e.Task.FileName == task.FileName {
-
-			// 生成下一个任务
-			if task.TaskType == TaskTypeMap {
-				for i := 0; i < c.NReduce; i++ {
-					newTask := Task{
-						TaskType: TaskTypeReduce,
-						//NReduce:     c.NReduce,
-						FileName:    "mr-" + strconv.Itoa(i),
-						OutFileName: "mr-out-" + strconv.Itoa(i),
-					}
-					c.WorkerTaskList = append(c.WorkerTaskList, &WorkerTask{Task: newTask})
-					c.TaskQueue <- newTask
+	if task.TaskType == TaskTypeMap {
+		for _, e := range c.MapWorkerTasks {
+			// done
+			if e.Task.TaskId == task.TaskId {
+				if req.WorkerId == e.WorkerId {
+					e.TaskStatus = TaskStatusSuccess
+					c.MapWaitGroup.Done()
+				} else {
+					fmt.Printf("%v The task(%d) of worker(%d) has been stolen by worker(%d) \n", time.Now(), task.TaskId, req.WorkerId, e.WorkerId)
 				}
 			}
+		}
 
-			e.TaskStatus = TaskStatusSuccess
+	} else {
+		// finish reduce task
+		for _, e := range c.ReduceWorkerTasks {
+			// done
+			if e.Task.TaskId == task.TaskId {
+				if req.WorkerId == e.WorkerId {
+					e.TaskStatus = TaskStatusSuccess
+					c.ReduceWaitGroup.Done()
+				} else {
+					fmt.Printf("%v The task(%d) of worker(%d) has been stolen by worker(%d) \n", time.Now(), task.TaskId, req.WorkerId, e.WorkerId)
+				}
+			}
 		}
 	}
 
@@ -110,13 +149,12 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 func Done(c *Coordinator) bool {
 	// Your code here.
-	// todo 并发问题
-	for _, e := range c.WorkerTaskList {
-		if e.TaskStatus != TaskStatusSuccess {
-			return false
-		}
+	select {
+	case <-c.Done:
+		return true
+	default:
+		return false
 	}
-	return true
 }
 
 // MakeCoordinator
@@ -128,17 +166,68 @@ func MakeCoordinator(files []string, nMap int, nReduce int) *Coordinator {
 
 	// init Coordinator
 	c.NMap = nMap
+	c.MapTaskQueue = make(chan Task, nMap)
 	c.NReduce = nReduce
-	c.TaskQueue = make(chan Task, nMap+nReduce)
+	c.ReduceTaskQueue = make(chan Task, nReduce)
+	c.Done = make(chan bool, 1)
 
 	// producer: put map task to the queue
-	for _, file := range files {
-		task := Task{FileName: file, TaskType: TaskTypeMap, NReduce: nReduce}
-		c.WorkerTaskList = append(c.WorkerTaskList, &WorkerTask{Task: task})
-		c.TaskQueue <- task
+	for i, file := range files {
+		mTask := Task{TaskId: i, TaskType: TaskTypeMap, FileName: file, NReduce: nReduce}
+		c.MapWorkerTasks = append(c.MapWorkerTasks, &WorkerTask{Task: mTask})
+		c.MapWaitGroup.Add(1) // add to group before being put/get from queue
+		c.MapTaskQueue <- mTask
 	}
+
+	// generate reduce task on all map tasks are done
+	go func() {
+		c.MapWaitGroup.Wait()
+		fmt.Printf("%v Map tasks all done.\n", time.Now())
+
+		for reduceId := 0; reduceId < c.NReduce; reduceId++ {
+			rTask := Task{TaskType: TaskTypeReduce, TaskId: reduceId}
+			c.ReduceWorkerTasks = append(c.ReduceWorkerTasks, &WorkerTask{Task: rTask})
+			c.ReduceWaitGroup.Add(1) // add to group before being put/get from queue
+			fmt.Printf("%v Enqueue reduce task:%s.\n", time.Now(), rTask)
+			c.ReduceTaskQueue <- rTask
+		}
+
+		go func() {
+			c.ReduceWaitGroup.Wait()
+			fmt.Printf("%v Reduce tasks all done.\n", time.Now())
+
+			// when all reduce tasks done, the whole job is done.
+			//close(c.ReduceTaskQueue)
+			c.Done <- true
+			close(c.Done)
+		}()
+	}()
+
+	// put timeout tasks to queue again
+	go func() {
+		ticker := time.NewTicker(TimeOutSeconds * time.Second)
+		for {
+			select {
+			case current := <-ticker.C:
+				for _, mapWorkerTask := range c.MapWorkerTasks {
+					if current.Sub(mapWorkerTask.StartTime).Seconds() > TimeOutSeconds {
+						c.MapTaskQueue <- mapWorkerTask.Task
+					}
+				}
+
+				for _, reduceWorkerTask := range c.ReduceWorkerTasks {
+					if current.Sub(reduceWorkerTask.StartTime).Seconds() > TimeOutSeconds {
+						c.ReduceTaskQueue <- reduceWorkerTask.Task
+					}
+				}
+			case <-c.Done:
+				return
+			}
+		}
+	}()
 
 	// start coordinator as a rpc server
 	c.server()
+
 	return &c
 }

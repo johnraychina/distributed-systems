@@ -24,7 +24,7 @@ func main() {
 	for !mr.Done(coordinator) {
 		time.Sleep(time.Second)
 	}
-	fmt.Println("coordinator detected no task, exiting...")
-
 	time.Sleep(time.Second)
+	fmt.Println("coordinator detected no task, exit.")
+
 }

@@ -41,6 +41,7 @@ func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 // Worker
 // main/mrworker.go calls this function.
 func Worker(workerId int, mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
+	fmt.Printf("%v worker(%d) started.\n", time.Now(), workerId)
 
 	for {
 		// Your worker implementation here.
@@ -57,38 +58,50 @@ func Worker(workerId int, mapf func(string, string) []KeyValue, reducef func(str
 		case TaskTypeMap:
 			doMap(mapf, reply.Task)
 		case TaskTypeReduce:
+			// reduce 任务需要等到map任务全部完成才能开始执行：
+			//一个方案是worker轮询coordinator请求工作,每次请求之间sleep一下.
+			//另一个方案是coordinator中在相关的RPC处理器等待，Go在各自线程中处理RPC的请求, 所以一个RPC等待不会影响其他RPC请求的处理.
 			doReduce(reducef, reply.Task)
 		}
 
+		//time.Sleep(5 * time.Second) // todo delay一下，方便开多个worker
+
 		FinishTask(reply.Task, workerId)
-		fmt.Printf("%v  Finished ", time.Now(), reply.Task)
+		fmt.Printf("%v Finished %s \n", time.Now(), reply.Task)
 	}
 }
 
 func doReduce(reducef func(string, []string) string, reduceTask *Task) {
 
-	file, err := os.Open(reduceTask.FileName)
+	outFileName := fmt.Sprintf("mr-out-%d", reduceTask.TaskId)
+	ofile, err := os.Create(outFileName)
 	if err != nil {
-		log.Fatalf("cannot open %v", file)
+		log.Fatalf("error create file %v", outFileName)
 	}
-	scanner := bufio.NewScanner(file)
-	defer file.Close()
+	defer ofile.Close()
 
+	// read mr-*-Y, where Y==reduceTaskId
+	// output mr-out-Y
+	fileNames := listImmediateFilename(reduceTask.TaskId)
 	var intermediate []KeyValue
-	for scanner.Scan() {
-		line := scanner.Text()
-		col := strings.Split(line, " ")
-		intermediate = append(intermediate, KeyValue{Key: col[0], Value: col[1]})
-	}
+	for _, fileName := range fileNames {
+		fmt.Printf("%v Task:%s reducing file:%v\n", time.Now(), reduceTask, fileName)
+		file, err := os.Open(fileName)
+		if err != nil {
+			log.Fatalf("cannot open %v", file)
+		}
+		scanner := bufio.NewScanner(file)
+		defer file.Close()
 
+		for scanner.Scan() {
+			line := scanner.Text()
+			col := strings.Split(line, " ")
+			intermediate = append(intermediate, KeyValue{Key: col[0], Value: col[1]})
+		}
+	}
 	// 相同的key组成一组，sort，丢给reduce处理
 	// being partitioned into NxM buckets.
 	sort.Sort(ByKey(intermediate))
-
-	ofile, err := os.Create(reduceTask.OutFileName)
-	if err != nil {
-		log.Fatalf("error create file %v", reduceTask.OutFileName)
-	}
 
 	i := 0
 	for i < len(intermediate) {
@@ -107,9 +120,29 @@ func doReduce(reducef func(string, []string) string, reduceTask *Task) {
 
 		i = j
 	}
+
 }
 
-// 输入文件名，输出 mr-reduceId
+func listImmediateFilename(reduceTaskId int) (fileNames []string) {
+	files, err := ioutil.ReadDir(".")
+	if err != nil {
+		panic(err)
+	}
+
+	for _, f := range files {
+		if fileBelongTo(f, reduceTaskId) {
+			fileNames = append(fileNames, f.Name())
+		}
+	}
+	return fileNames
+}
+
+func fileBelongTo(f os.FileInfo, reduceTaskId int) bool {
+	suffix := strconv.Itoa(reduceTaskId)
+	return !f.IsDir() && f.Name()[0:2] == "mr" && f.Name()[len(f.Name())-len(suffix):] == suffix
+}
+
+// 输入文件名，输出 mr-mapId-reduceId
 func doMap(mapf func(string, string) []KeyValue, mapTask *Task) {
 	fileName := mapTask.FileName
 	file, err := os.Open(fileName)
@@ -131,10 +164,9 @@ func doMap(mapf func(string, string) []KeyValue, mapTask *Task) {
 	sort.Sort(ByKey(intermediate))
 
 	// 每个文件分NReduce个桶
-	// fixme 同一台启动多个worker，注意避免互相干扰
 	intermediateFiles := make([]*os.File, mapTask.NReduce, mapTask.NReduce)
 	for r := 0; r < mapTask.NReduce; r++ {
-		ofile, _ := os.Create("mr-" + strconv.Itoa(r))
+		ofile, _ := os.Create(fmt.Sprintf("mr-%d-%d", mapTask.TaskId, r))
 		intermediateFiles[r] = ofile
 	}
 	defer func() {

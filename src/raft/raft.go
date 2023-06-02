@@ -21,6 +21,7 @@ import (
 	//	"bytes"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	//	"distributed-systems/labgob"
 	"distributed-systems/labrpc"
@@ -67,8 +68,9 @@ type Raft struct {
 	log         []*logEntry
 
 	//Volatile state on all servers
-	commitIndex int // index of highest log entry known to be committed(initialized to 0, increases monotonically)
-	lastApplied int // index of highest log entry applied to state machine (initialized to 0, increases monotonically)
+	heartbeatTime time.Time // timeout control
+	commitIndex   int       // index of highest log entry known to be committed(initialized to 0, increases monotonically)
+	lastApplied   int       // index of highest log entry applied to state machine (initialized to 0, increases monotonically)
 
 	// Volatile state on leaders(Reinitialized after election).
 	nextIndex  []int //for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
@@ -230,6 +232,65 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+// AppendEntriesReq for a leader to replicate log to followers; or heartbeat.
+type AppendEntriesReq struct {
+	term         int         // leader’s term
+	leaderId     int         // so follower can redirect clients
+	prevLogIndex int         // index of log entry immediately preceding new ones
+	prevLogTerm  int         // term of prevLogIndex entry
+	entries      []*logEntry // log entries to store (empty for heartbeat;  may send more than one for efficiency)
+	leaderCommit int         // leader’s commitIndex
+}
+
+// AppendEntriesReply
+type AppendEntriesReply struct {
+	term    int  // currentTerm, for leader to update itself
+	success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesReq, reply *AppendEntriesReply) {
+
+	//Receiver implementation:
+	//1. Reply false if term < currentTerm (§5.1)
+	if args.term < rf.currentTerm {
+		reply.success = false
+		reply.term = rf.currentTerm
+		return
+	}
+
+	// todo 需要加锁
+
+	//2. Reply false if log doesn’t contain an entry at prevLogIndex
+	//whose term matches prevLogTerm (§5.3)
+	myLastLogIndex := len(rf.log) - 1
+	myLastLog := rf.log[myLastLogIndex]
+	if !(args.prevLogTerm == myLastLog.term && args.prevLogIndex == myLastLogIndex) {
+		reply.success = false
+		reply.term = rf.currentTerm
+		return
+	}
+
+	//heartbeats
+	if len(args.entries) == 0 {
+		rf.heartbeatTime = time.Now()
+	}
+
+	//3. If an existing entry conflicts with a new one (same index
+	//but different terms), delete the existing entry and all that
+	//follow it (§5.3)
+	// todo to be continued...
+
+	//4. Append any new entries not already in the log
+	//5. If leaderCommit > commitIndex, set commitIndex =
+	//	min(leaderCommit, index of last new entry)
+
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesReq, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 

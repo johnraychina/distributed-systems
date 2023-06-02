@@ -62,7 +62,26 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	currentTerm int // latest term server has seen (initialized to 0 on first boot, increases monotonically)
+	voteFor     int // candidateId that received vote in current term (or null if none)
+	log         []*logEntry
 
+	//Volatile state on all servers
+	commitIndex int // index of highest log entry known to be committed(initialized to 0, increases monotonically)
+	lastApplied int // index of highest log entry applied to state machine (initialized to 0, increases monotonically)
+
+	// Volatile state on leaders(Reinitialized after election).
+	nextIndex  []int //for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
+	matchIndex []int //for each server, index of the highest log entry known to be replicated on server (initialized to 0, increases monotonically)
+
+}
+
+//log entries; each entry contains command
+//for state machine, and term when entry
+//was received by leader (first index is 1)
+type logEntry struct {
+	command interface{}
+	term    int
 }
 
 // return currentTerm and whether this server
@@ -139,6 +158,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	term         int // candidate’s term
+	candidateId  int // candidate requesting vote
+	lastLogIndex int // index of candidate’s last log entry (§5.4)
+	lastLogTerm  int // term of candidate’s last log entry (§5.4)
 }
 
 //
@@ -147,6 +170,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	term        int  // currentTerm, for candidate to update itself
+	voteGranted bool // 'true' means candidate received vote
 }
 
 //
@@ -154,6 +179,24 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+
+	//Receiver implementation:
+	//1. Reply false if term < currentTerm (§5.1)
+	//2. If votedFor is null or candidateId, and candidate’s log is at
+	//least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
+	if args.term < rf.currentTerm {
+		reply.term = rf.currentTerm
+		reply.voteGranted = false
+		return
+	}
+
+	if rf.voteFor < 0 || rf.voteFor == args.candidateId {
+		if args.lastLogIndex >= len(rf.log)-1 {
+			reply.term = rf.currentTerm
+			reply.voteGranted = true
+			return
+		}
+	}
 }
 
 //
@@ -266,6 +309,27 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.currentTerm = 0
+	rf.voteFor = -1
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+
+	// request for vote
+	//go func() {
+	//	request := &RequestVoteArgs{
+	//		term:        rf.currentTerm + 1,
+	//		candidateId: rf.me,
+	//	}
+	//	// todo 最近提交的？  (§5.4) 是否会存在并发问题？
+	//	if len(rf.log) > 0 {
+	//		request.lastLogIndex = len(rf.log) - 1
+	//		request.lastLogTerm = rf.log[request.lastLogIndex].term
+	//	}
+	//
+	//	// vote for myself
+	//	reply := &RequestVoteReply{}
+	//	rf.sendRequestVote(me, request, reply)
+	//}()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
